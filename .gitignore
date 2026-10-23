@@ -1,0 +1,4 @@
+/target
+dashboard/dist
+*.log
+.env
