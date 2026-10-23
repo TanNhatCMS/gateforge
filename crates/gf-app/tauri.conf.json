@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GateForge",
+  "version": "0.1.0",
+  "identifier": "com.gateforge.app",
+  "build": {
+    "frontendDist": "../../dashboard-ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "GateForge",
+        "url": "http://127.0.0.1:20230/",
+        "width": 1280,
+        "height": 820,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

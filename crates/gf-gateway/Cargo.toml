@@ -1,0 +1,24 @@
+[package]
+name = "gf-gateway"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "gf_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gateforge"
+path = "src/main.rs"
+
+[dependencies]
+gf-providers = { path = "../gf-providers" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = "0.5"
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

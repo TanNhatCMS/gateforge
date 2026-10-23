@@ -1,0 +1,20 @@
+[package]
+name = "gateforge-app"
+version = "0.1.0"
+edition = "2021"
+description = "GateForge — self-hosted AI gateway (Tauri shell)"
+
+# Standalone package: kept out of the parent workspace (tauri deps are heavy
+# and the gateway workspace must stay light).
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+gf-gateway = { path = "../../crates/gf-gateway" }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
