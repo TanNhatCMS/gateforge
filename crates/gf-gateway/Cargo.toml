@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 gf-providers = { path = "../gf-providers" }
+gf-translator = { path = "../gf-translator" }
+futures-util = "0.3"
+tokio-stream = "0.1"
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = "0.5"
