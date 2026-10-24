@@ -204,6 +204,59 @@ impl Store {
     pub fn delete_combo(&self, id: &str) -> rusqlite::Result<usize> {
         self.conn.execute("DELETE FROM combos WHERE id = ?1", [id])
     }
+
+    // ── key validation ──
+    pub fn validate_api_key(&self, key: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT isActive FROM apiKeys WHERE key = ?1",
+                [key],
+                |r| r.get::<_, i64>(0).map(|v| v != 0),
+            )
+            .unwrap_or(false)
+    }
+
+    // ── usage recording ──
+    pub fn record_usage(
+        &self,
+        timestamp: &str,
+        provider: Option<&str>,
+        model: Option<&str>,
+        connection_id: Option<&str>,
+        api_key: Option<&str>,
+        endpoint: Option<&str>,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        status: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+            rusqlite::params![
+                timestamp, provider, model, connection_id, api_key, endpoint,
+                prompt_tokens, completion_tokens, status
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn usage_summary(&self) -> rusqlite::Result<Vec<(String, i64, i64)>> {
+        // (provider, model, prompt, completion) aggregated
+        let mut stmt = self.conn.prepare(
+            "SELECT provider, model, SUM(promptTokens), SUM(completionTokens)
+             FROM usageHistory GROUP BY provider, model ORDER BY SUM(promptTokens) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0).unwrap_or_default().unwrap_or_default(),
+                r.get::<_, Option<String>>(1).unwrap_or_default().unwrap_or_default(),
+                r.get::<_, i64>(2).unwrap_or(0),
+                r.get::<_, i64>(3).unwrap_or(0),
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map(|rows| rows.into_iter().map(|(p, m, pt, ct)| (format!("{p}/{m}"), pt, ct)).collect())
+    }
 }
 
 /// First-boot migration: when the GateForge db does not exist yet and a

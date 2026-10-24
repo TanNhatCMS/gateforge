@@ -167,7 +167,68 @@ async fn models() -> Json<Value> {
 // OpenAI chat.completions: direct dispatch when the model prefix has registry
 // transport + active credentials (phase 3), else passthrough to the configured
 // upstream (9router hop) with the model id kept verbatim.
-async fn chat_completions(State(store): State<SharedStore>, Json(body): Json<Value>) -> impl IntoResponse {
+// Auth wrapper: validate the Bearer key from the request headers.
+fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(String::from)
+}
+
+async fn chat_completions_with_auth(
+    State(store): State<SharedStore>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let Some(key) = extract_bearer(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Missing API key".to_string(),
+        )
+            .into_response();
+    };
+    let valid = {
+        let store = store.lock().expect("store lock");
+        store.validate_api_key(&key)
+    };
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Invalid API key".to_string(),
+        )
+            .into_response();
+    }
+    chat_completions(store, body, &key).await
+}
+
+async fn messages_with_auth(
+    State(store): State<SharedStore>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let Some(key) = extract_bearer(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Missing API key".to_string(),
+        )
+            .into_response();
+    };
+    let valid = {
+        let store = store.lock().expect("store lock");
+        store.validate_api_key(&key)
+    };
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Invalid API key".to_string(),
+        )
+            .into_response();
+    }
+    messages(store, headers, body, &key).await
+}
+
+async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axum::response::Response {
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
@@ -298,6 +359,10 @@ async fn chat_completions(State(store): State<SharedStore>, Json(body): Json<Val
 
     let base = upstream_base();
     let key = upstream_key();
+    tracing::debug!(
+        "passthrough → {base}/v1/chat/completions | key set: {}",
+        !key.is_empty()
+    );
     let client = reqwest::Client::new();
 
     let mut request = client
@@ -426,8 +491,8 @@ pub fn build_router() -> Router<SharedStore> {
         .route("/", get(index))
         .route("/health", get(health))
         .route("/v1/models", get(models))
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/messages", post(messages))
+        .route("/v1/chat/completions", post(chat_completions_with_auth))
+        .route("/v1/messages", post(messages_with_auth))
         .route("/api/connections", get(api_connections))
         .route("/api/keys", get(list_keys).post(create_key))
         .route("/api/keys/{id}", axum::routing::delete(delete_key))
@@ -584,10 +649,11 @@ async fn delete_combo(
 // Claude Messages endpoint: translate → upstream /v1/chat/completions →
 // translate back (full JSON, or SSE events when stream=true).
 async fn messages(
-    State(store): State<SharedStore>,
+    store: SharedStore,
     headers: axum::http::HeaderMap,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
+    body: Value,
+    api_key: &str,
+) -> axum::response::Response {
     let base = upstream_base();
     let key = upstream_key();
     let model = body
