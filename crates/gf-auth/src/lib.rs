@@ -43,7 +43,7 @@ pub fn machine_id() -> String {
     id
 }
 
-fn uuid_v4() -> String {
+pub fn uuid_v4() -> String {
     let bytes = rand_bytes();
     let mut b = bytes;
     b[6] = (b[6] & 0x0f) | 0x40;
@@ -92,7 +92,7 @@ fn hex32(bytes: &[u8]) -> String {
 // ── HMAC-SHA256 via the sha2 crate (hand-rolled impl had parity issues) ──
 use sha2::{Digest, Sha256};
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut k = [0u8; 64];
     if key.len() > 64 {
         let mut hasher = Sha256::new();
@@ -115,7 +115,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     hasher.finalize().try_into().unwrap()
 }
 
-fn sha256(data: &[u8]) -> [u8; 32] {
+pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().try_into().unwrap()
@@ -181,6 +181,19 @@ pub fn validate_api_key_shape(key: &str, machine_id: &str) -> bool {
         && parts[1] == machine_id
         && parts[2].len() == 6
         && parts[3].len() == 8
+}
+
+/// Mint a dashboard session token (HMAC of machine id + password + expiry).
+pub fn dashboard_session_token(machine_id: &str, password: &str) -> String {
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() + 86400)
+        .unwrap_or(0);
+    let mac = hmac_sha256(
+        format!("{machine_id}{password}").as_bytes(),
+        format!("gateforge-session-{expiry}").as_bytes(),
+    );
+    format!("{}.{}", hex32(&mac), expiry)
 }
 
 #[cfg(test)]

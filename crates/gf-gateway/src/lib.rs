@@ -1,16 +1,19 @@
 // GateForge gateway core — exposed as a library so the Tauri app shell can
 // embed the server; the `gateforge` binary is a thin wrapper over start_server.
 use axum::{
-    extract::State,
-    http::StatusCode,
+    extract::{Path, State},
+    http::{header, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
-use serde_json::Value;
-use std::sync::Arc;
+use chrono::Utc;
+use gf_auth::machine_id;
+use gf_store::Store;
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
-type SharedStore = std::sync::Arc<std::sync::Mutex<gf_store::Store>>;
+type SharedStore = Arc<Mutex<Store>>;
 
 /// Success-path helper for the cross-format route: read a claude-format
 /// upstream response (buffering SSE into one message) and emit an OpenAI
@@ -426,6 +429,10 @@ pub fn build_router() -> Router<SharedStore> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
         .route("/api/connections", get(api_connections))
+        .route("/api/keys", get(list_keys).post(create_key))
+        .route("/api/keys/{id}", axum::routing::delete(delete_key))
+        .route("/api/auth/login", post(auth_login))
+        .route("/api/auth/status", get(auth_status))
         .fallback_service(tower::service_fn(|_req| async {
             Ok::<_, std::convert::Infallible>(StatusCode::NOT_FOUND)
         }))
@@ -712,7 +719,7 @@ pub async fn start_server(port: u16) -> std::io::Result<()> {
 
     // Open the store (first boot copies a 9router database when present).
     let data_dir = gf_store::default_data_dir();
-    let store = gf_store::Store::open(&data_dir).map_err(std::io::Error::other)?;
+    let store = Store::open(&data_dir).map_err(std::io::Error::other)?;
     let connections = store.list_connections(None).unwrap_or_default();
     tracing::info!(
         "store at {} — {} connections (migrated from 9router on first boot)",
@@ -725,4 +732,161 @@ pub async fn start_server(port: u16) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("listening on http://localhost:{port}");
     axum::serve(listener, app).await
+}
+
+// ── Dashboard auth + API key management handlers ──
+
+/// POST /api/auth/login — verify password, mint a session token.
+async fn auth_login(
+    State(store): State<SharedStore>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let password = body.get("password").and_then(|p| p.as_str()).unwrap_or("");
+    let settings = {
+        let store = store.lock().expect("store lock");
+        store.get_settings()
+    };
+    let settings_json: Value = settings
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(json_null());
+    let stored = settings_json
+        .get("password")
+        .and_then(|p| p.as_str())
+        .unwrap_or("");
+    let require = settings_json
+        .get("requireLogin")
+        .and_then(|r| r.as_bool())
+        .unwrap_or(true);
+
+    // First boot: no password stored → accept the default or any password.
+    if !stored.is_empty() && stored != password {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "Invalid password" })),
+        )
+            .into_response();
+    }
+    if stored.is_empty() && require && password != "123456" {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "Invalid password" })),
+        )
+            .into_response();
+    }
+
+    // Mint a session token (HS256-like: HMAC of machine id + expiry).
+    let auth = gf_auth::machine_id();
+    let token = gf_auth::dashboard_session_token(&auth, password);
+    (
+        [(header::SET_COOKIE, format!("auth_token={token}; Path=/; HttpOnly"))],
+        axum::Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
+/// GET /api/auth/status — requireLogin + whether a password is set.
+async fn auth_status(State(store): State<SharedStore>) -> impl IntoResponse {
+    let settings = {
+        let store = store.lock().expect("store lock");
+        store.get_settings()
+    };
+    let settings_json: Value = settings
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(json_null());
+    let require = settings_json
+        .get("requireLogin")
+        .and_then(|r| r.as_bool())
+        .unwrap_or(true);
+    let has_password = settings_json
+        .get("password")
+        .and_then(|p| p.as_str())
+        .is_some_and(|p| !p.is_empty());
+    axum::Json(serde_json::json!({
+        "requireLogin": require,
+        "authMode": "password",
+        "hasPassword": has_password,
+    }))
+}
+
+/// GET /api/keys — list API keys.
+async fn list_keys(State(store): State<SharedStore>) -> impl IntoResponse {
+    let keys = {
+        let store = store.lock().expect("store lock");
+        store.list_api_keys().unwrap_or_default()
+    };
+    let data: Vec<Value> = keys
+        .iter()
+        .map(|k| {
+            serde_json::json!({
+                "id": k.id, "key": k.key, "name": k.name, "isActive": k.is_active,
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({ "keys": data }))
+}
+
+/// POST /api/keys — create a new API key (sk-{machineId}-{keyId}-{crc8}).
+async fn create_key(
+    State(store): State<SharedStore>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let name = body
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("unnamed")
+        .to_string();
+    let machine = machine_id();
+    let generated = gf_auth::generate_api_key(&machine);
+    let id = gf_auth::uuid_v4();
+    let now = chrono::Utc::now().to_rfc3339();
+    {
+        let store = store.lock().expect("store lock");
+        if let Err(error) = store
+            .upsert_api_key(&gf_store::ApiKeyRow {
+                id: id.clone(),
+                key: generated.key.clone(),
+                name: Some(name.clone()),
+                is_active: true,
+            })
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("key persist failed: {error}"),
+            )
+                .into_response();
+        }
+    }
+    tracing::info!(name, "API key created");
+    (
+        StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "id": id, "key": generated.key, "name": name, "machineId": machine,
+        })),
+    )
+        .into_response()
+}
+
+/// DELETE /api/keys/{id} — remove an API key.
+async fn delete_key(
+    State(store): State<SharedStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let deleted = {
+        let store = store.lock().expect("store lock");
+        match store.delete_api_key(&id) {
+            Ok(count) => count,
+            Err(error) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error}"))
+                    .into_response()
+            }
+        }
+    };
+    if deleted == 0 {
+        return (StatusCode::NOT_FOUND, "key not found").into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn json_null() -> Value {
+    Value::Object(serde_json::Map::new())
 }

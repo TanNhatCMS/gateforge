@@ -150,6 +150,21 @@ impl Store {
         })?;
         rows.collect()
     }
+
+    pub fn upsert_api_key(&self, row: &ApiKeyRow) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO apiKeys(id, key, name, isActive, createdAt)
+             VALUES(?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET key = excluded.key, name = excluded.name,
+               isActive = excluded.isActive",
+            rusqlite::params![row.id, row.key, row.name, row.is_active as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_api_key(&self, id: &str) -> rusqlite::Result<usize> {
+        self.conn.execute("DELETE FROM apiKeys WHERE id = ?1", [id])
+    }
 }
 
 /// First-boot migration: when the GateForge db does not exist yet and a
