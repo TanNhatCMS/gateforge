@@ -6,6 +6,7 @@ members = [
     "crates/gf-store",
     "crates/gf-translator",
     "crates/gf-chatcore",
+    "crates/gf-auth",
 ]
 exclude = [
     "crates/gf-app",
