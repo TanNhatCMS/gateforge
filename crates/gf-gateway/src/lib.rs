@@ -1,12 +1,16 @@
 // GateForge gateway core — exposed as a library so the Tauri app shell can
 // embed the server; the `gateforge` binary is a thin wrapper over start_server.
 use axum::{
+    extract::State,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use serde_json::Value;
+use std::sync::Arc;
+
+type SharedStore = std::sync::Arc<std::sync::Mutex<gf_store::Store>>;
 
 pub fn upstream_base() -> String {
     std::env::var("UPSTREAM_BASE_URL").unwrap_or_else(|_| "http://localhost:20228".into())
@@ -152,14 +156,38 @@ async fn sse_to_claude_response(
     (StatusCode::OK, axum::Json(claude)).into_response()
 }
 
+/// Dashboard-facing: connections carried over from 9router (phase 2 read path).
+async fn api_connections(State(store): State<SharedStore>) -> impl IntoResponse {
+    let rows = {
+        let store = store.lock().expect("store lock");
+        store.list_connections(None).unwrap_or_default()
+    };
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "provider": c.provider,
+                "authType": c.auth_type,
+                "name": c.name,
+                "email": c.email,
+                "priority": c.priority,
+                "isActive": c.is_active,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "connections": data }))
+}
+
 /// Build the axum router (shared by the binary and the Tauri shell).
-pub fn build_router() -> Router {
+pub fn build_router() -> Router<SharedStore> {
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
+        .route("/api/connections", get(api_connections))
         .fallback_service(tower::service_fn(|_req| async {
             Ok::<_, std::convert::Infallible>(StatusCode::NOT_FOUND)
         }))
@@ -318,7 +346,18 @@ pub async fn start_server(port: u16) -> std::io::Result<()> {
         if upstream_key().is_empty() { "(none)" } else { "(set)" }
     );
 
-    let app = build_router();
+    // Open the store (first boot copies a 9router database when present).
+    let data_dir = gf_store::default_data_dir();
+    let store = gf_store::Store::open(&data_dir).map_err(std::io::Error::other)?;
+    let connections = store.list_connections(None).unwrap_or_default();
+    tracing::info!(
+        "store at {} — {} connections (migrated from 9router on first boot)",
+        data_dir.display(),
+        connections.len()
+    );
+
+    let app = build_router()
+        .with_state(std::sync::Arc::new(std::sync::Mutex::new(store)));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("listening on http://localhost:{port}");
     axum::serve(listener, app).await

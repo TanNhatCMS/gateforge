@@ -343,6 +343,7 @@ dependencies = [
  "axum",
  "futures-util",
  "gf-providers",
+ "gf-store",
  "gf-translator",
  "reqwest",
  "serde",

@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 gf-providers = { path = "../gf-providers" }
 gf-translator = { path = "../gf-translator" }
+gf-store = { path = "../gf-store" }
 futures-util = "0.3"
 tokio-stream = "0.1"
 tokio = { workspace = true }
