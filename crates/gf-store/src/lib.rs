@@ -165,6 +165,45 @@ impl Store {
     pub fn delete_api_key(&self, id: &str) -> rusqlite::Result<usize> {
         self.conn.execute("DELETE FROM apiKeys WHERE id = ?1", [id])
     }
+
+    // ── combos ──
+    pub fn list_combos(&self) -> rusqlite::Result<Vec<(String, String, Option<String>, String)>> {
+        // (id, name, kind, models_json)
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, kind, models FROM combos ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    pub fn upsert_combo(
+        &self,
+        id: &str,
+        name: &str,
+        kind: Option<&str>,
+        models_json: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO combos(id, name, kind, models, createdAt, updatedAt)
+             VALUES(?1, ?2, ?3, ?4, datetime('now'), datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name, kind = excluded.kind, models = excluded.models,
+               updatedAt = datetime('now')",
+            rusqlite::params![id, name, kind, models_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_combo(&self, id: &str) -> rusqlite::Result<usize> {
+        self.conn.execute("DELETE FROM combos WHERE id = ?1", [id])
+    }
 }
 
 /// First-boot migration: when the GateForge db does not exist yet and a

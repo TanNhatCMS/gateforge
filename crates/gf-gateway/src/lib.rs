@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, State},
     http::{header, StatusCode},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -433,9 +433,152 @@ pub fn build_router() -> Router<SharedStore> {
         .route("/api/keys/{id}", axum::routing::delete(delete_key))
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/status", get(auth_status))
+        .route("/api/combos", get(list_combos).post(create_combo))
+        .route("/api/combos/{id}", axum::routing::delete(delete_combo))
+        .route(
+            "/api/settings",
+            get(get_settings_handler).patch(patch_settings),
+        )
         .fallback_service(tower::service_fn(|_req| async {
             Ok::<_, std::convert::Infallible>(StatusCode::NOT_FOUND)
         }))
+}
+
+// ── Settings handlers ──
+
+/// GET /api/settings — return the raw settings JSON (secrets stripped).
+async fn get_settings_handler(State(store): State<SharedStore>) -> impl IntoResponse {
+    let settings_json = {
+        let store = store.lock().expect("store lock");
+        store.get_settings()
+    };
+    let mut value: Value = settings_json
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(json_null());
+    // Strip secrets (parity with 9router PROTECTED_SETTING_KEYS).
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("password");
+        obj.remove("mitmSudoEncrypted");
+    }
+    axum::Json(value)
+}
+
+/// PATCH /api/settings — merge updates into the settings JSON.
+async fn patch_settings(
+    State(store): State<SharedStore>,
+    Json(updates): Json<Value>,
+) -> impl IntoResponse {
+    if !updates.is_object() {
+        return (StatusCode::BAD_REQUEST, "settings must be an object").into_response();
+    }
+    let settings_json = {
+        let store = store.lock().expect("store lock");
+        let existing = store.get_settings().unwrap_or_default();
+        let mut current: Value = serde_json::from_str(&existing).unwrap_or(json_null());
+        if let (Some(current_obj), Some(update_obj)) =
+            (current.as_object_mut(), updates.as_object())
+        {
+            for (key, value) in update_obj {
+                current_obj.insert(key.clone(), value.clone());
+            }
+        }
+        let merged = serde_json::to_string(&current).unwrap_or_default();
+        store.set_settings(&merged).map_err(std::io::Error::other)
+    };
+    match settings_json {
+        Ok(()) => axum::Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("settings update failed: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+// ── Combos handlers ──
+
+/// GET /api/combos — list all combos.
+async fn list_combos(State(store): State<SharedStore>) -> impl IntoResponse {
+    let rows = {
+        let store = store.lock().expect("store lock");
+        store.list_combos().unwrap_or_default()
+    };
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|(id, name, kind, models_json)| {
+            serde_json::json!({
+                "id": id,
+                "name": name,
+                "kind": kind,
+                "models": serde_json::from_str::<Value>(models_json)
+                    .unwrap_or(Value::Array(vec![])),
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({ "combos": data }))
+}
+
+/// POST /api/combos — create a new combo.
+async fn create_combo(
+    State(store): State<SharedStore>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let name = body
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid combo name").into_response();
+    }
+    let models = body
+        .get("models")
+        .cloned()
+        .unwrap_or(Value::Array(vec![]));
+    let kind = body.get("kind").and_then(|k| k.as_str()).unwrap_or("fallback");
+    let id = gf_auth::uuid_v4();
+    let models_json = serde_json::to_string(&models).unwrap_or_default();
+    {
+        let store = store.lock().expect("store lock");
+        if let Err(error) = store.upsert_combo(&id, &name, Some(kind), &models_json) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("combo create failed: {error}"),
+            )
+                .into_response();
+        }
+    }
+    (
+        StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "id": id, "name": name, "kind": kind, "models": models,
+        })),
+    )
+        .into_response()
+}
+
+/// DELETE /api/combos/{id} — remove a combo.
+async fn delete_combo(
+    State(store): State<SharedStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let deleted = {
+        let store = store.lock().expect("store lock");
+        store.delete_combo(&id).map_err(std::io::Error::other)
+    };
+    match deleted {
+        Ok(count) if count > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => (StatusCode::NOT_FOUND, "combo not found").into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("combo delete failed: {error}"),
+        )
+            .into_response(),
+    }
 }
 
 // Claude Messages endpoint: translate → upstream /v1/chat/completions →
