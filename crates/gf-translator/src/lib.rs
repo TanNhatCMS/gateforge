@@ -111,6 +111,93 @@ pub fn stop_reason_to_finish_reason(stop: Option<&str>) -> &'static str {
     }
 }
 
+/// OpenAI chat.completions request → Claude Messages request (the inverse of
+/// claude_request_to_openai; system messages fold into the system field).
+pub fn openai_request_to_claude(body: &Value) -> Value {
+    let mut out = json!({});
+    if let Some(model) = body.get("model") {
+        out["model"] = model.clone();
+    }
+    for key in ["temperature", "top_p"] {
+        if let Some(v) = body.get(key) {
+            out[key] = v.clone();
+        }
+    }
+    if let Some(max) = body.get("max_tokens") {
+        out["max_tokens"] = max.clone();
+    } else {
+        out["max_tokens"] = json!(4096); // Anthropic requires the field.
+    }
+    if let Some(stop) = body.get("stop") {
+        if let Some(arr) = stop.as_array() {
+            out["stop_sequences"] = Value::Array(arr.clone());
+        } else if let Some(s) = stop.as_str() {
+            out["stop_sequences"] = json!([s]);
+        }
+    }
+
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut messages: Vec<Value> = Vec::new();
+    if let Some(openai_msgs) = body.get("messages").and_then(|v| v.as_array()) {
+        for msg in openai_msgs {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+            let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+            if role == "system" {
+                system_parts.push(content.to_string());
+            } else {
+                messages.push(json!({
+                    "role": if role == "assistant" { "assistant" } else { "user" },
+                    "content": content,
+                }));
+            }
+        }
+    }
+    if !system_parts.is_empty() {
+        out["system"] = Value::String(system_parts.join("\n"));
+    }
+    out["messages"] = Value::Array(messages);
+    out
+}
+
+/// Claude message response → OpenAI chat.completion (non-stream).
+pub fn claude_response_to_openai(body: &Value, model: &str) -> Value {
+    let text = body
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| {
+                    if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        b.get("text").and_then(|t| t.as_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    let stop = body.get("stop_reason").and_then(|s| s.as_str());
+    let usage = body.get("usage").cloned().unwrap_or(json!({}));
+    json!({
+        "id": body.get("id").cloned().unwrap_or(json!("chatcmpl-gf")),
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": text },
+            "finish_reason": stop_reason_to_finish_reason(stop),
+        }],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+            "completion_tokens": usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+            "total_tokens": usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0)
+                + usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+        }
+    })
+}
+
 /// OpenAI chat.completion (non-stream) → Claude message response.
 pub fn openai_response_to_claude(body: &Value, model: &str) -> Value {
     let choice = body
@@ -314,5 +401,47 @@ mod tests {
         assert_eq!(finish_reason_to_stop_reason(Some("length")), "max_tokens");
         assert_eq!(stop_reason_to_finish_reason(Some("max_tokens")), "length");
         assert_eq!(stop_reason_to_finish_reason(Some("end_turn")), "stop");
+    }
+
+    #[test]
+    fn openai_request_to_claude_folds_system() {
+        let openai = json!({
+            "model": "glm/glm-5.3-flash",
+            "max_tokens": 32,
+            "stop": ["END"],
+            "messages": [
+                { "role": "system", "content": "be terse" },
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": "hello" },
+                { "role": "user", "content": "bye" }
+            ]
+        });
+        let claude = openai_request_to_claude(&openai);
+        assert_eq!(claude["system"], "be terse");
+        assert_eq!(claude["stop_sequences"], json!(["END"]));
+        assert_eq!(claude["max_tokens"], 32);
+        let msgs = claude["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["role"], "user");
+    }
+
+    #[test]
+    fn claude_response_to_openai_mapping() {
+        let claude = json!({
+            "id": "msg_1",
+            "content": [
+                { "type": "text", "text": "hello " },
+                { "type": "text", "text": "world" },
+                { "type": "tool_use", "id": "t1" }
+            ],
+            "stop_reason": "max_tokens",
+            "usage": { "input_tokens": 7, "output_tokens": 3 }
+        });
+        let openai = claude_response_to_openai(&claude, "m");
+        assert_eq!(openai["choices"][0]["message"]["content"], "hello world");
+        assert_eq!(openai["choices"][0]["finish_reason"], "length");
+        assert_eq!(openai["usage"]["prompt_tokens"], 7);
+        assert_eq!(openai["usage"]["total_tokens"], 10);
     }
 }

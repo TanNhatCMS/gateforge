@@ -12,6 +12,116 @@ use std::sync::Arc;
 
 type SharedStore = std::sync::Arc<std::sync::Mutex<gf_store::Store>>;
 
+/// Success-path helper for the cross-format route: read a claude-format
+/// upstream response (buffering SSE into one message) and emit an OpenAI
+/// chat.completion. Exhausted outcomes map to their error response.
+trait DirectClaudeToOpenai {
+    async fn map_direct_claude_to_openai(self, model: &str) -> axum::response::Response;
+}
+
+impl DirectClaudeToOpenai for gf_chatcore::DispatchOutcome {
+    async fn map_direct_claude_to_openai(self, model: &str) -> axum::response::Response {
+        match self {
+            gf_chatcore::DispatchOutcome::Success { response, attempts, .. } => {
+                tracing::info!(model, attempts, "direct dispatch (claude→openai)");
+                let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::OK);
+                let content_type = response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let claude_json = if content_type.starts_with("text/event-stream") {
+                    match sse_buffer_to_claude_json(response, &model).await {
+                        Some(json) => json,
+                        None => {
+                            return (StatusCode::BAD_GATEWAY, "upstream stream carried no events")
+                                .into_response()
+                        }
+                    }
+                } else {
+                    match response.json::<Value>().await {
+                        Ok(json) => json,
+                        Err(error) => {
+                            return (StatusCode::BAD_GATEWAY, format!("decode failed: {error}"))
+                                .into_response()
+                        }
+                    }
+                };
+                let openai = gf_translator::claude_response_to_openai(&claude_json, model);
+                (status, axum::Json(openai)).into_response()
+            }
+            gf_chatcore::DispatchOutcome::Exhausted { status, last_error, attempts } => {
+                tracing::warn!(model, attempts, "all credentials exhausted");
+                let code =
+                    StatusCode::from_u16(status.unwrap_or(502)).unwrap_or(StatusCode::BAD_GATEWAY);
+                (code, format!("all accounts failed: {last_error}")).into_response()
+            }
+        }
+    }
+}
+
+/// Buffer a claude-format SSE stream into one claude message JSON.
+async fn sse_buffer_to_claude_json(response: reqwest::Response, model: &str) -> Option<Value> {
+    let bytes = response.bytes().await.unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes);
+    let mut message: Option<Value> = None;
+    let mut blocks: Vec<Value> = Vec::new();
+    let mut stop_reason = Value::Null;
+    let mut input_tokens = 0i64;
+    let mut output_tokens = 0i64;
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data: ") else { continue };
+        let Ok(event) = serde_json::from_str::<Value>(data) else { continue };
+        match event.get("type").and_then(|t| t.as_str()) {
+            Some("message_start") => {
+                message = event.get("message").cloned();
+                if let Some(tokens) = event.pointer("/message/usage/input_tokens").and_then(|v| v.as_i64()) {
+                    input_tokens = tokens;
+                }
+            }
+            Some("content_block_start") => {
+                if event.get("content_block").and_then(|b| b.get("type")).and_then(|t| t.as_str())
+                    == Some("text")
+                {
+                    blocks.push(serde_json::json!({ "type": "text", "text": "" }));
+                }
+            }
+            Some("content_block_delta") => {
+                if let Some(last) = blocks.last_mut() {
+                    if let Some(delta_text) =
+                        event.pointer("/delta/text").and_then(|t| t.as_str())
+                    {
+                        let current = last["text"].as_str().unwrap_or_default().to_string();
+                        last["text"] = Value::String(current + delta_text);
+                    }
+                }
+            }
+            Some("message_delta") => {
+                if let Some(stop) = event.pointer("/delta/stop_reason") {
+                    stop_reason = stop.clone();
+                }
+                if let Some(tokens) = event.pointer("/usage/output_tokens").and_then(|v| v.as_i64())
+                {
+                    output_tokens = tokens;
+                }
+            }
+            _ => {}
+        }
+    }
+    let message = message?;
+    Some(serde_json::json!({
+        "id": message.get("id").cloned().unwrap_or(serde_json::json!("msg_gf")),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": blocks,
+        "stop_reason": stop_reason,
+        "stop_sequence": Value::Null,
+        "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens },
+    }))
+}
+
 pub fn upstream_base() -> String {
     std::env::var("UPSTREAM_BASE_URL").unwrap_or_else(|_| "http://localhost:20228".into())
 }
@@ -61,7 +171,6 @@ async fn chat_completions(State(store): State<SharedStore>, Json(body): Json<Val
         .unwrap_or_default()
         .to_string();
 
-    // Direct route for OpenAI-compatible providers (llm7, tokenrouter, …).
     {
         let registry = gf_providers::Registry::load_embedded();
         let route = {
@@ -69,12 +178,77 @@ async fn chat_completions(State(store): State<SharedStore>, Json(body): Json<Val
             gf_chatcore::direct_route(&registry, &store, &model)
         };
         if let Some((provider, model_id, creds)) = route {
-            if provider
-                .transport
-                .as_ref()
-                .is_some_and(|t| t.format != "claude" && !t.base_url.starts_with("zcode://"))
-            {
-                let transport = provider.transport.clone().unwrap();
+            let transport = provider.transport.clone().unwrap();
+            if transport.format == "claude" && !transport.base_url.starts_with("zcode://") {
+                // Cross-format: client speaks OpenAI, provider speaks Claude.
+                // Streamed claude responses are buffered into one completion.
+                let claude_body = gf_translator::openai_request_to_claude(&body);
+                let outcome = gf_chatcore::dispatch_with_failover(
+                    &provider.id,
+                    &transport,
+                    &creds,
+                    &model_id,
+                    &claude_body,
+                )
+                .await;
+                return match outcome {
+                    gf_chatcore::DispatchOutcome::Success {
+                        response, attempts, ..
+                    } => {
+                        tracing::info!(
+                            provider = provider.id,
+                            model = model_id,
+                            attempts,
+                            "direct dispatch (openai→claude buffered)"
+                        );
+                        // Upstream speaks claude; emit openai chat.completion.
+                        let status = StatusCode::from_u16(response.status().as_u16())
+                            .unwrap_or(StatusCode::OK);
+                        let content_type = response
+                            .headers()
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        let claude_json = if content_type.starts_with("text/event-stream") {
+                            match sse_buffer_to_claude_json(response, &model).await {
+                                Some(json) => json,
+                                None => {
+                                    return (
+                                        StatusCode::BAD_GATEWAY,
+                                        "upstream stream carried no events",
+                                    )
+                                        .into_response()
+                                }
+                            }
+                        } else {
+                            match response.json::<Value>().await {
+                                Ok(json) => json,
+                                Err(error) => {
+                                    return (
+                                        StatusCode::BAD_GATEWAY,
+                                        format!("decode failed: {error}"),
+                                    )
+                                        .into_response()
+                                }
+                            }
+                        };
+                        let openai = gf_translator::claude_response_to_openai(&claude_json, &model);
+                        (status, axum::Json(openai)).into_response()
+                    }
+                    gf_chatcore::DispatchOutcome::Exhausted {
+                        status,
+                        last_error,
+                        attempts,
+                    } => {
+                        tracing::warn!(provider = provider.id, attempts, "all credentials exhausted");
+                        let code = StatusCode::from_u16(status.unwrap_or(502))
+                            .unwrap_or(StatusCode::BAD_GATEWAY);
+                        (code, format!("all accounts failed: {last_error}")).into_response()
+                    }
+                };
+            }
+            if transport.format != "claude" && !transport.base_url.starts_with("zcode://") {
                 return match gf_chatcore::dispatch_openai_with_failover(
                     &provider.id,
                     &transport,
@@ -273,7 +447,7 @@ async fn messages(
         .to_string();
     let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
-    // Direct route (phase 3): registry provider + migrated credentials →
+    // Direct route (phase 3/4): registry provider + migrated credentials →
     // dispatch straight to the provider upstream with failover; no 9router hop.
     {
         let registry = gf_providers::Registry::load_embedded();
@@ -282,8 +456,9 @@ async fn messages(
             gf_chatcore::direct_route(&registry, &store, &model)
         };
         if let Some((provider, model_id, creds)) = route {
-            if provider.transport.as_ref().is_some_and(|t| t.format == "claude") {
-                let transport = provider.transport.clone().unwrap();
+            let transport = provider.transport.clone().unwrap();
+            if transport.format == "claude" && !transport.base_url.starts_with("zcode://") {
+                // Same format: dispatch the claude body verbatim.
                 return match gf_chatcore::dispatch_with_failover(
                     &provider.id,
                     &transport,
@@ -300,7 +475,7 @@ async fn messages(
                             provider = provider.id,
                             model = model_id,
                             attempts,
-                            "direct dispatch"
+                            "direct dispatch (claude)"
                         );
                         // claude→claude: passthrough the provider response.
                         let status =
@@ -310,6 +485,69 @@ async fn messages(
                             Err(error) => (
                                 StatusCode::BAD_GATEWAY,
                                 format!("direct upstream read failed: {error}"),
+                            )
+                                .into_response(),
+                        }
+                    }
+                    gf_chatcore::DispatchOutcome::Exhausted {
+                        status,
+                        last_error,
+                        attempts,
+                    } => {
+                        tracing::warn!(
+                            provider = provider.id,
+                            attempts,
+                            "all credentials exhausted"
+                        );
+                        let code = StatusCode::from_u16(status.unwrap_or(502))
+                            .unwrap_or(StatusCode::BAD_GATEWAY);
+                        (code, format!("all accounts failed: {last_error}")).into_response()
+                    }
+                };
+            }
+            // Cross-format: client speaks Claude, provider speaks OpenAI.
+            if transport.format != "claude" && !transport.base_url.starts_with("zcode://") {
+                let openai_body = gf_translator::claude_request_to_openai(&body);
+                return match gf_chatcore::dispatch_openai_with_failover(
+                    &provider.id,
+                    &transport,
+                    &creds,
+                    &model_id,
+                    &openai_body,
+                )
+                .await
+                {
+                    gf_chatcore::DispatchOutcome::Success {
+                        response, attempts, ..
+                    } => {
+                        tracing::info!(
+                            provider = provider.id,
+                            model = model_id,
+                            attempts,
+                            "direct dispatch (openai→claude)"
+                        );
+                        let content_type = response
+                            .headers()
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        if content_type.starts_with("text/event-stream") {
+                            // Reuse the SSE buffering path used for the
+                            // passthrough route (openai chunks → claude JSON).
+                            return sse_to_claude_response(response, &model).await;
+                        }
+                        match response.json::<Value>().await {
+                            Ok(openai_json) => {
+                                let claude = gf_translator::openai_response_to_claude(
+                                    &openai_json,
+                                    &model,
+                                );
+                                (StatusCode::OK, axum::Json(claude)).into_response()
+                            }
+                            Err(error) => (
+                                StatusCode::BAD_GATEWAY,
+                                format!("direct upstream decode failed: {error}"),
                             )
                                 .into_response(),
                         }
