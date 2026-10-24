@@ -487,6 +487,59 @@ async fn api_connections(State(store): State<SharedStore>) -> impl IntoResponse 
 
 /// Build the axum router (shared by the binary and the Tauri shell).
 pub fn build_router() -> Router<SharedStore> {
+    // Dashboard UI proxy: non-API requests are forwarded to the 9router
+    // dashboard server. API and gateway routes are handled natively.
+    let dashboard_base =
+        std::env::var("DASHBOARD_UPSTREAM").unwrap_or_else(|_| "http://localhost:20127".into());
+
+    async fn proxy_dashboard(
+        base: &str,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        let path = req.uri().path().to_string();
+        let query = req
+            .uri()
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
+        let url = format!("{base}{path}{query}");
+        let method = req.method().clone();
+        let mut headers = req.headers().clone();
+        headers.remove("host");
+        let body = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        match reqwest::Client::new()
+            .request(method, &url)
+            .headers(headers)
+            .body(body.to_vec())
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status =
+                    StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let mut response_headers = response.headers().clone();
+                response_headers.remove("transfer-encoding");
+                let body = response.bytes().await.unwrap_or_default();
+                (status, response_headers, body).into_response()
+            }
+            Err(error) => (
+                StatusCode::BAD_GATEWAY,
+                format!("dashboard proxy error: {error}"),
+            )
+                .into_response(),
+        }
+    }
+
+    let proxy = tower::service_fn(move |req: axum::http::Request<axum::body::Body>| {
+        let base = dashboard_base.clone();
+        async move {
+            let response = proxy_dashboard(&base, req).await;
+            Ok::<_, std::convert::Infallible>(response)
+        }
+    });
+
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
@@ -495,18 +548,36 @@ pub fn build_router() -> Router<SharedStore> {
         .route("/v1/messages", post(messages_with_auth))
         .route("/api/connections", get(api_connections))
         .route("/api/keys", get(list_keys).post(create_key))
-        .route("/api/keys/{id}", axum::routing::delete(delete_key))
+        .route("/api/keys/{id}", delete(delete_key))
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/status", get(auth_status))
         .route("/api/combos", get(list_combos).post(create_combo))
-        .route("/api/combos/{id}", axum::routing::delete(delete_combo))
+        .route("/api/combos/{id}", delete(delete_combo))
         .route(
             "/api/settings",
             get(get_settings_handler).patch(patch_settings),
         )
-        .fallback_service(tower::service_fn(|_req| async {
-            Ok::<_, std::convert::Infallible>(StatusCode::NOT_FOUND)
-        }))
+        .route("/api/usage", get(usage_summary_handler))
+        .fallback_service(proxy)
+}
+
+/// GET /api/usage — aggregated usage per provider/model from the store.
+async fn usage_summary_handler(State(store): State<SharedStore>) -> impl IntoResponse {
+    let summary = {
+        let store = store.lock().expect("store lock");
+        store.usage_summary().unwrap_or_default()
+    };
+    let data: Vec<Value> = summary
+        .iter()
+        .map(|(key, prompt, completion)| {
+            serde_json::json!({
+                "key": key,
+                "promptTokens": prompt,
+                "completionTokens": completion,
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({ "usage": data }))
 }
 
 // ── Settings handlers ──
