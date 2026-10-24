@@ -13,7 +13,7 @@ pub struct Display {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Transport {
-    #[serde(default)]
+    #[serde(default, rename = "baseUrl")]
     pub base_url: String,
     #[serde(default = "default_format")]
     pub format: String,
@@ -21,6 +21,9 @@ pub struct Transport {
     pub headers: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub no_auth: bool,
+    /// Everything else (auth scheme, urlSuffix, quirks…) preserved verbatim.
+    #[serde(flatten)]
+    pub raw: serde_json::Value,
 }
 
 fn default_format() -> String {

@@ -15,6 +15,7 @@ path = "src/main.rs"
 gf-providers = { path = "../gf-providers" }
 gf-translator = { path = "../gf-translator" }
 gf-store = { path = "../gf-store" }
+gf-chatcore = { path = "../gf-chatcore" }
 futures-util = "0.3"
 tokio-stream = "0.1"
 tokio = { workspace = true }

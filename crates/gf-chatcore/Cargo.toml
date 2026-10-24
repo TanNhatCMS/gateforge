@@ -1,0 +1,12 @@
+[package]
+name = "gf-chatcore"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gf-providers = { path = "../gf-providers" }
+gf-store = { path = "../gf-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }

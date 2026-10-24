@@ -51,10 +51,74 @@ async fn models() -> Json<Value> {
     Json(serde_json::json!({ "object": "list", "data": data }))
 }
 
-// Phase 0 passthrough: forward the request body verbatim. The model id keeps
-// its "provider/model" prefix — 9router routes on it. Plain OpenAI upstreams
-// get the bare id later, behind an explicit opt-in flag.
-async fn chat_completions(Json(body): Json<Value>) -> impl IntoResponse {
+// OpenAI chat.completions: direct dispatch when the model prefix has registry
+// transport + active credentials (phase 3), else passthrough to the configured
+// upstream (9router hop) with the model id kept verbatim.
+async fn chat_completions(State(store): State<SharedStore>, Json(body): Json<Value>) -> impl IntoResponse {
+    let model = body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    // Direct route for OpenAI-compatible providers (llm7, tokenrouter, …).
+    {
+        let registry = gf_providers::Registry::load_embedded();
+        let route = {
+            let store = store.lock().expect("store lock");
+            gf_chatcore::direct_route(&registry, &store, &model)
+        };
+        if let Some((provider, model_id, creds)) = route {
+            if provider
+                .transport
+                .as_ref()
+                .is_some_and(|t| t.format != "claude" && !t.base_url.starts_with("zcode://"))
+            {
+                let transport = provider.transport.clone().unwrap();
+                return match gf_chatcore::dispatch_openai_with_failover(
+                    &provider.id,
+                    &transport,
+                    &creds,
+                    &model_id,
+                    &body,
+                )
+                .await
+                {
+                    gf_chatcore::DispatchOutcome::Success {
+                        response, attempts, ..
+                    } => {
+                        tracing::info!(
+                            provider = provider.id,
+                            model = model_id,
+                            attempts,
+                            "direct dispatch (openai)"
+                        );
+                        let status = StatusCode::from_u16(response.status().as_u16())
+                            .unwrap_or(StatusCode::OK);
+                        match response.text().await {
+                            Ok(text) => (status, text).into_response(),
+                            Err(error) => (
+                                StatusCode::BAD_GATEWAY,
+                                format!("direct upstream read failed: {error}"),
+                            )
+                                .into_response(),
+                        }
+                    }
+                    gf_chatcore::DispatchOutcome::Exhausted {
+                        status,
+                        last_error,
+                        attempts,
+                    } => {
+                        tracing::warn!(provider = provider.id, attempts, "all credentials exhausted");
+                        let code = StatusCode::from_u16(status.unwrap_or(502))
+                            .unwrap_or(StatusCode::BAD_GATEWAY);
+                        (code, format!("all accounts failed: {last_error}")).into_response()
+                    }
+                };
+            }
+        }
+    }
+
     let base = upstream_base();
     let key = upstream_key();
     let client = reqwest::Client::new();
@@ -196,6 +260,7 @@ pub fn build_router() -> Router<SharedStore> {
 // Claude Messages endpoint: translate → upstream /v1/chat/completions →
 // translate back (full JSON, or SSE events when stream=true).
 async fn messages(
+    State(store): State<SharedStore>,
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -208,6 +273,68 @@ async fn messages(
         .to_string();
     let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
+    // Direct route (phase 3): registry provider + migrated credentials →
+    // dispatch straight to the provider upstream with failover; no 9router hop.
+    {
+        let registry = gf_providers::Registry::load_embedded();
+        let route = {
+            let store = store.lock().expect("store lock");
+            gf_chatcore::direct_route(&registry, &store, &model)
+        };
+        if let Some((provider, model_id, creds)) = route {
+            if provider.transport.as_ref().is_some_and(|t| t.format == "claude") {
+                let transport = provider.transport.clone().unwrap();
+                return match gf_chatcore::dispatch_with_failover(
+                    &provider.id,
+                    &transport,
+                    &creds,
+                    &model_id,
+                    &body,
+                )
+                .await
+                {
+                    gf_chatcore::DispatchOutcome::Success {
+                        response, attempts, ..
+                    } => {
+                        tracing::info!(
+                            provider = provider.id,
+                            model = model_id,
+                            attempts,
+                            "direct dispatch"
+                        );
+                        // claude→claude: passthrough the provider response.
+                        let status =
+                            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::OK);
+                        match response.text().await {
+                            Ok(text) => (status, text).into_response(),
+                            Err(error) => (
+                                StatusCode::BAD_GATEWAY,
+                                format!("direct upstream read failed: {error}"),
+                            )
+                                .into_response(),
+                        }
+                    }
+                    gf_chatcore::DispatchOutcome::Exhausted {
+                        status,
+                        last_error,
+                        attempts,
+                    } => {
+                        tracing::warn!(
+                            provider = provider.id,
+                            attempts,
+                            "all credentials exhausted"
+                        );
+                        let code = StatusCode::from_u16(status.unwrap_or(502))
+                            .unwrap_or(StatusCode::BAD_GATEWAY);
+                        (code, format!("all accounts failed: {last_error}")).into_response()
+                    }
+                };
+            }
+        }
+    }
+
+    let base = upstream_base();
+    let key = upstream_key();
     let openai_body = gf_translator::claude_request_to_openai(&body);
     let client = reqwest::Client::new();
     let mut request = client
@@ -216,7 +343,6 @@ async fn messages(
     if !key.is_empty() {
         request = request.bearer_auth(key);
     }
-    // Forward the client's anthropic-version header for observability upstream.
     if let Some(version) = headers.get("anthropic-version") {
         if let Ok(v) = version.to_str() {
             request = request.header("anthropic-version", v);
