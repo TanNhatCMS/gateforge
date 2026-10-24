@@ -1,45 +1,39 @@
-// GateForge Tauri shell: starts the gateway server on a dedicated thread
-// (own tokio runtime — immune to shell/runtime ordering), then opens the
-// webview pointed at the local gateway URL.
+// GateForge Tauri shell: starts the gateway on a dedicated thread, polls
+// until the port is open, then opens the webview pointed at the gateway URL.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use gf_gateway::default_port;
+use std::net::TcpStream;
 
 fn main() {
     let port = default_port();
+    // Start the gateway on a dedicated thread.
     std::thread::spawn(move || {
-        let debug = |line: &str| {
-            std::fs::write(
-                "D:\\Project\\gateforge\\gf-debug.log",
-                format!("{line}\n"),
-            )
-            .ok(); // last-line marker (temporary diagnostics)
-        };
-        debug("thread started");
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("gateway tokio runtime");
-        debug("runtime built");
-        runtime.block_on(async move {
-            debug("binding...");
-            let router = gf_gateway::build_router();
-            let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
-                Ok(listener) => {
-                    debug(&format!("bound on {port}"));
-                    listener
-                }
-                Err(error) => {
-                    debug(&format!("bind failed: {error}"));
-                    return;
-                }
-            };
-            debug("serving");
-            if let Err(error) = axum::serve(listener, router).await {
-                debug(&format!("serve failed: {error}"));
-            }
-        });
+        if let Err(error) = runtime.block_on(gf_gateway::start_server(port)) {
+            eprintln!("[gateforge] server failed: {error}");
+        }
     });
+
+    // Poll until the gateway port opens (max 10s).
+    let addr = format!("127.0.0.1:{port}");
+    let mut bound = false;
+    for _ in 0..50 {
+        if TcpStream::connect(&addr).is_ok() {
+            bound = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if bound {
+        eprintln!("[gateforge] gateway ready on {addr}");
+    } else {
+        eprintln!("[gateforge] gateway not ready within 10s — opening window anyway");
+    }
+
     tauri::Builder::default()
         .run(tauri::generate_context!())
         .expect("error while running GateForge");
