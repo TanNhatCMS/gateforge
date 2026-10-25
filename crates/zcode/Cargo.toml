@@ -6,3 +6,8 @@ edition.workspace = true
 [dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.11.1"
+aes-gcm = "0.10"
+base64 = "0.22"
+auth = { path = "../auth" }
+store = { path = "../store" }

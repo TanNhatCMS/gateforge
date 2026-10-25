@@ -167,12 +167,14 @@ async fn models() -> Json<Value> {
 // OpenAI chat.completions: direct dispatch when the model prefix has registry
 // transport + active credentials (phase 3), else passthrough to the configured
 // upstream (9router hop) with the model id kept verbatim.
-// Auth wrapper: validate the Bearer key from the request headers.
+// Auth wrapper: validate the Bearer key from the request headers (Anthropic
+// clients send x-api-key instead — accept both).
 fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()))
         .map(String::from)
 }
 
@@ -228,6 +230,68 @@ async fn messages_with_auth(
     messages(store, headers, body, &key).await
 }
 
+// Native zcode bridge dispatch for the OpenAI endpoint: run one turn through
+// the local ZCode runtime and emit OpenAI JSON (or a single-chunk SSE body
+// when the client asked for streaming).
+async fn zcode_dispatch_openai(
+    body: &Value,
+    model: &str,
+    model_id: &str,
+) -> axum::response::Response {
+    let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    match zcode::dispatch(model_id, body).await {
+        Ok(text) => {
+            tracing::info!(model, chars = text.chars().count(), "zcode bridge turn complete");
+            if stream {
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    zcode::openai_sse_body(model, &text),
+                )
+                    .into_response()
+            } else {
+                axum::Json(zcode::openai_json_response(model, &text)).into_response()
+            }
+        }
+        Err(error) => zcode_bridge_error(&error),
+    }
+}
+
+// Native zcode bridge dispatch for the Claude endpoint: translate the claude
+// request to OpenAI, run the turn, translate the reply back to claude format
+// (buffered — same semantics as the other /v1/messages direct routes).
+async fn zcode_dispatch_claude(
+    body: &Value,
+    model: &str,
+    model_id: &str,
+) -> axum::response::Response {
+    let openai_body = translator::claude_request_to_openai(body);
+    match zcode::dispatch(model_id, &openai_body).await {
+        Ok(text) => {
+            tracing::info!(model, chars = text.chars().count(), "zcode bridge turn complete");
+            let openai_json = zcode::openai_json_response(model, &text);
+            let claude = translator::openai_response_to_claude(&openai_json, model);
+            (StatusCode::OK, axum::Json(claude)).into_response()
+        }
+        Err(error) => zcode_bridge_error(&error),
+    }
+}
+
+fn zcode_bridge_error(error: &str) -> axum::response::Response {
+    tracing::warn!(error, "zcode bridge failed");
+    let status = StatusCode::from_u16(zcode::bridge_error_status(error))
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    (
+        status,
+        axum::Json(json!({
+            "error": {
+                "type": "api_error",
+                "message": format!("[ZCode bridge] {error}"),
+            }
+        })),
+    )
+        .into_response()
+}
+
 async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axum::response::Response {
     let model = body
         .get("model")
@@ -243,6 +307,11 @@ async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axu
         };
         if let Some((provider, model_id, creds)) = route {
             let transport = provider.transport.clone().unwrap();
+            if transport.base_url.starts_with("zcode://") {
+                // Native zcode bridge: the model call is made by the locally
+                // installed ZCode runtime (Start Plan quota), no HTTP upstream.
+                return zcode_dispatch_openai(&body, &model, &model_id).await;
+            }
             if transport.format == "claude" && !transport.base_url.starts_with("zcode://") {
                 // Cross-format: client speaks OpenAI, provider speaks Claude.
                 // Streamed claude responses are buffered into one completion.
@@ -744,6 +813,11 @@ async fn messages(
         };
         if let Some((provider, model_id, creds)) = route {
             let transport = provider.transport.clone().unwrap();
+            if transport.base_url.starts_with("zcode://") {
+                // Native zcode bridge for the Claude endpoint: translate
+                // claude→openai, run the turn, translate the reply back.
+                return zcode_dispatch_claude(&body, &model, &model_id).await;
+            }
             if transport.format == "claude" && !transport.base_url.starts_with("zcode://") {
                 // Same format: dispatch the claude body verbatim.
                 return match chatcore::dispatch_with_failover(

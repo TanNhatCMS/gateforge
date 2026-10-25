@@ -17,6 +17,7 @@ translator = { path = "../translator" }
 store = { path = "../store" }
 chatcore = { path = "../chatcore" }
 auth = { path = "../auth" }
+zcode = { path = "../zcode" }
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 tokio-stream = "0.1"

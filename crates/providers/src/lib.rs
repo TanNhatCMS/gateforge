@@ -19,7 +19,7 @@ pub struct Transport {
     pub format: String,
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, rename = "noAuth")]
     pub no_auth: bool,
     /// Everything else (auth scheme, urlSuffix, quirks…) preserved verbatim.
     #[serde(flatten)]

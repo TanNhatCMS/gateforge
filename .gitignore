@@ -3,3 +3,4 @@ target/
 dashboard/dist
 *.log
 .env
+.mimosa/

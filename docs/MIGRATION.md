@@ -54,8 +54,16 @@ binary. Only the backend moves to Rust. Registry/model catalogs are **data**
 - **Phase 5 — dashboard APIs**: the ~179 `/api/*` routes (providers, keys, combos,
   settings, oauth, cli-tools…), dashboardGuard port, WebLogin capture flow.
 - **Phase 6 — extras**: proxy pools, MITM, tunnel, self-update, zcode stdio bridge
-  (replaces the spawned-runtime hack: the bridge logic becomes native GateForge
-  providers).
+  (**done for the bridge**: native `zcode` crate resolves spawn targets, pins the
+  Start Plan selection, decrypts the shared zcode JWT, and exchanges one JSON
+  line with a bundled node bridge client `assets/zcode-bridge-client.cjs` that
+  drives the runtime — server dist binary framing preferred, desktop CLI
+  app-server NDJSON as fallback). Node hosts the protocol client because the
+  server dist closes its stdio mid-handshake when the client process is not
+  node — verified against node clients with byte-identical frames succeeding
+  where the Rust client got EOF; the binary frame codec stays in Rust as the
+  tested wire-format reference. Verified live end-to-end: Start Plan
+  GLM-5.3-Flash through `/v1/chat/completions` (JSON + SSE) and `/v1/messages`.
 - **Verification rule** (every phase): run 9router JS and GateForge side-by-side on
   the same requests and diff the SSE/JSON output.
 

@@ -61,9 +61,18 @@ pub fn direct_route(
     if transport.base_url.is_empty() {
         return None;
     }
-    let creds = credentials_for(store, provider_id);
+    let mut creds = credentials_for(store, provider_id);
     if creds.is_empty() {
-        return None;
+        if !transport.no_auth {
+            return None;
+        }
+        // noAuth providers (the zcode bridge, and HTTP providers that need no
+        // key) own their auth elsewhere — route with a placeholder so the
+        // dispatch loop has one attempt.
+        creds.push(Credential {
+            connection_id: String::new(),
+            api_key: String::new(),
+        });
     }
     Some((provider, model_id.to_string(), creds))
 }
@@ -88,6 +97,10 @@ fn apply_auth(
         "raw" => api_key.to_string(),
         _ => format!("Bearer {api_key}"),
     };
+    // noAuth transports carry no key — skip the header entirely.
+    if api_key.is_empty() {
+        return request;
+    }
     request = request.header(header, value);
     request
 }
@@ -258,6 +271,38 @@ mod tests {
         assert_eq!(split_model_id("glm-5.3-flash"), None);
         assert_eq!(split_model_id("/x"), None);
         assert_eq!(split_model_id("x/"), None);
+    }
+
+    #[test]
+    fn direct_route_allows_noauth_provider() {
+        // The zcode bridge owns its auth in the local ZCode profile — it must
+        // route with no stored credentials (placeholder credential instead).
+        let dir = std::env::temp_dir().join(format!("chatcore-noauth-{}", std::process::id()));
+        std::env::set_var("GATEFORGE_NO_MIGRATE", "1");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).expect("store");
+        let registry = Registry::load_embedded();
+        let provider = registry.get("zcode");
+        assert!(provider.is_some(), "zcode must be in the embedded registry");
+        let transport = provider.unwrap().transport.clone();
+        assert!(transport.is_some(), "zcode must have a transport");
+        let transport = transport.unwrap();
+        assert!(
+            transport.base_url.starts_with("zcode://"),
+            "unexpected zcode base_url: {}",
+            transport.base_url
+        );
+        assert!(transport.no_auth, "zcode transport must be noAuth");
+        let route = direct_route(&registry, &store, "zcode/glm-5.3-flash");
+        assert!(
+            route.is_some(),
+            "zcode (noAuth) should route without stored credentials"
+        );
+        let (provider, model_id, creds) = route.expect("route");
+        assert_eq!(provider.id, "zcode");
+        assert_eq!(model_id, "glm-5.3-flash");
+        assert_eq!(creds.len(), 1);
+        assert!(creds[0].api_key.is_empty());
     }
 
     #[test]

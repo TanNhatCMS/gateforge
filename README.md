@@ -24,7 +24,18 @@ cargo run -p gateway
 
 - `GET /health` — liveness + version
 - `GET /v1/models` — registry model list (`provider/model`)
-- `POST /v1/chat/completions` — passthrough to the configured upstream (phase 0)
+- `POST /v1/chat/completions` — direct dispatch or passthrough to the configured upstream
+- `POST /v1/messages` — Claude format, translated both ways
+
+## ZCode Start Plan bridge
+
+`zcode/glm-5.3-flash` and `zcode/glm-5.3` are served through the locally
+installed ZCode app: GateForge spawns a bundled node bridge client that drives
+the ZCode runtime over stdio (server dist at `~/.zcode/server/` preferred,
+desktop CLI app-server as fallback). Model calls are made by the genuine ZCode
+process, so Start Plan quota works without touching the Z.ai gateway's
+WAF/captcha material. No credentials are stored — the shared local ZCode
+profile owns auth; a `node` runtime must be on PATH.
 
 ## Extract the provider registry
 
