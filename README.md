@@ -18,7 +18,7 @@ gradual-migration plan from 9router.
 ## Run
 
 ```bash
-cargo run -p gf-gateway
+cargo run -p gateway
 # PORT=20228 UPSTREAM_BASE_URL=... UPSTREAM_API_KEY=... to configure
 ```
 
@@ -30,5 +30,5 @@ cargo run -p gf-gateway
 
 ```bash
 node tools/extract-registry.mjs <path-to-9router-checkout>
-# -> crates/gf-providers/registry.json
+# -> crates/providers/registry.json
 ```

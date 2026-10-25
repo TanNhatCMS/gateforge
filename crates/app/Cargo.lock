@@ -89,6 +89,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "auth"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -388,6 +397,18 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "chatcore"
+version = "0.1.0"
+dependencies = [
+ "providers",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "store",
+ "tracing",
+]
 
 [[package]]
 name = "chrono"
@@ -1074,12 +1095,35 @@ name = "gateforge-app"
 version = "0.1.0"
 dependencies = [
  "axum",
- "gf-gateway",
+ "gateway",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
+]
+
+[[package]]
+name = "gateway"
+version = "0.1.0"
+dependencies = [
+ "auth",
+ "axum",
+ "chatcore",
+ "chrono",
+ "futures-util",
+ "providers",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "store",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "translator",
 ]
 
 [[package]]
@@ -1223,74 +1267,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
-]
-
-[[package]]
-name = "gf-auth"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.11.1",
-]
-
-[[package]]
-name = "gf-chatcore"
-version = "0.1.0"
-dependencies = [
- "gf-providers",
- "gf-store",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "gf-gateway"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "futures-util",
- "gf-auth",
- "gf-chatcore",
- "gf-providers",
- "gf-store",
- "gf-translator",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gf-providers"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "gf-store"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
-]
-
-[[package]]
-name = "gf-translator"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2820,6 +2796,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "providers"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3556,6 +3540,14 @@ name = "static_vcruntime"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
+
+[[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+]
 
 [[package]]
 name = "string_cache"
@@ -4363,6 +4355,14 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "translator"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

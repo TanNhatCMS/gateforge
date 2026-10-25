@@ -1,5 +1,5 @@
 [package]
-name = "gf-providers"
+name = "translator"
 version.workspace = true
 edition.workspace = true
 

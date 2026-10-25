@@ -1,10 +1,10 @@
 [package]
-name = "gf-gateway"
+name = "gateway"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "gf_gateway"
+name = "gateway"
 path = "src/lib.rs"
 
 [[bin]]
@@ -12,11 +12,11 @@ name = "gateforge"
 path = "src/main.rs"
 
 [dependencies]
-gf-providers = { path = "../gf-providers" }
-gf-translator = { path = "../gf-translator" }
-gf-store = { path = "../gf-store" }
-gf-chatcore = { path = "../gf-chatcore" }
-gf-auth = { path = "../gf-auth" }
+providers = { path = "../providers" }
+translator = { path = "../translator" }
+store = { path = "../store" }
+chatcore = { path = "../chatcore" }
+auth = { path = "../auth" }
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 tokio-stream = "0.1"

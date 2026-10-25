@@ -8,8 +8,8 @@ async fn main() {
         )
         .init();
 
-    let port = gf_gateway::default_port();
-    if let Err(error) = gf_gateway::start_server(port).await {
+    let port = gateway::default_port();
+    if let Err(error) = gateway::start_server(port).await {
         tracing::error!("gateway failed: {error}");
         std::process::exit(1);
     }

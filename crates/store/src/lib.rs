@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn open_apply_schema_and_crud() {
         std::env::set_var("GATEFORGE_NO_MIGRATE", "1"); // isolate from the real 9router db
-        let dir = std::env::temp_dir().join(format!("gf-store-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("store-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Store::open(&dir).expect("open");
         assert!(store.get_settings().is_none());

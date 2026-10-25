@@ -2,7 +2,7 @@
 // until the port is open, then opens the webview pointed at the gateway URL.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use gf_gateway::default_port;
+use gateway::default_port;
 use std::net::TcpStream;
 
 fn main() {
@@ -13,7 +13,7 @@ fn main() {
             .enable_all()
             .build()
             .expect("gateway tokio runtime");
-        if let Err(error) = runtime.block_on(gf_gateway::start_server(port)) {
+        if let Err(error) = runtime.block_on(gateway::start_server(port)) {
             eprintln!("[gateforge] server failed: {error}");
         }
     });

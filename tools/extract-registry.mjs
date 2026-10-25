@@ -14,7 +14,7 @@ if (!repoArg) {
 const registryDir = resolve(repoArg, "open-sse", "providers", "registry");
 const outFile = process.argv[3]
   ? resolve(process.argv[3])
-  : resolve("crates", "gf-providers", "registry.json");
+  : resolve("crates", "providers", "registry.json");
 
 const files = readdirSync(registryDir)
   .filter((f) => f.endsWith(".js") && f !== "index.js")

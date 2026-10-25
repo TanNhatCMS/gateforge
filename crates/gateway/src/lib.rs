@@ -8,8 +8,8 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use gf_auth::machine_id;
-use gf_store::Store;
+use auth::machine_id;
+use store::Store;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
@@ -22,10 +22,10 @@ trait DirectClaudeToOpenai {
     async fn map_direct_claude_to_openai(self, model: &str) -> axum::response::Response;
 }
 
-impl DirectClaudeToOpenai for gf_chatcore::DispatchOutcome {
+impl DirectClaudeToOpenai for chatcore::DispatchOutcome {
     async fn map_direct_claude_to_openai(self, model: &str) -> axum::response::Response {
         match self {
-            gf_chatcore::DispatchOutcome::Success { response, attempts, .. } => {
+            chatcore::DispatchOutcome::Success { response, attempts, .. } => {
                 tracing::info!(model, attempts, "direct dispatch (claude→openai)");
                 let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::OK);
                 let content_type = response
@@ -51,10 +51,10 @@ impl DirectClaudeToOpenai for gf_chatcore::DispatchOutcome {
                         }
                     }
                 };
-                let openai = gf_translator::claude_response_to_openai(&claude_json, model);
+                let openai = translator::claude_response_to_openai(&claude_json, model);
                 (status, axum::Json(openai)).into_response()
             }
-            gf_chatcore::DispatchOutcome::Exhausted { status, last_error, attempts } => {
+            chatcore::DispatchOutcome::Exhausted { status, last_error, attempts } => {
                 tracing::warn!(model, attempts, "all credentials exhausted");
                 let code =
                     StatusCode::from_u16(status.unwrap_or(502)).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -149,7 +149,7 @@ async fn health() -> Json<Value> {
 }
 
 async fn models() -> Json<Value> {
-    let registry = gf_providers::Registry::load_embedded();
+    let registry = providers::Registry::load_embedded();
     let data: Vec<Value> = registry
         .model_entries()
         .into_iter()
@@ -236,18 +236,18 @@ async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axu
         .to_string();
 
     {
-        let registry = gf_providers::Registry::load_embedded();
+        let registry = providers::Registry::load_embedded();
         let route = {
             let store = store.lock().expect("store lock");
-            gf_chatcore::direct_route(&registry, &store, &model)
+            chatcore::direct_route(&registry, &store, &model)
         };
         if let Some((provider, model_id, creds)) = route {
             let transport = provider.transport.clone().unwrap();
             if transport.format == "claude" && !transport.base_url.starts_with("zcode://") {
                 // Cross-format: client speaks OpenAI, provider speaks Claude.
                 // Streamed claude responses are buffered into one completion.
-                let claude_body = gf_translator::openai_request_to_claude(&body);
-                let outcome = gf_chatcore::dispatch_with_failover(
+                let claude_body = translator::openai_request_to_claude(&body);
+                let outcome = chatcore::dispatch_with_failover(
                     &provider.id,
                     &transport,
                     &creds,
@@ -256,7 +256,7 @@ async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axu
                 )
                 .await;
                 return match outcome {
-                    gf_chatcore::DispatchOutcome::Success {
+                    chatcore::DispatchOutcome::Success {
                         response, attempts, ..
                     } => {
                         tracing::info!(
@@ -297,10 +297,10 @@ async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axu
                                 }
                             }
                         };
-                        let openai = gf_translator::claude_response_to_openai(&claude_json, &model);
+                        let openai = translator::claude_response_to_openai(&claude_json, &model);
                         (status, axum::Json(openai)).into_response()
                     }
-                    gf_chatcore::DispatchOutcome::Exhausted {
+                    chatcore::DispatchOutcome::Exhausted {
                         status,
                         last_error,
                         attempts,
@@ -313,7 +313,7 @@ async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axu
                 };
             }
             if transport.format != "claude" && !transport.base_url.starts_with("zcode://") {
-                return match gf_chatcore::dispatch_openai_with_failover(
+                return match chatcore::dispatch_openai_with_failover(
                     &provider.id,
                     &transport,
                     &creds,
@@ -322,7 +322,7 @@ async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axu
                 )
                 .await
                 {
-                    gf_chatcore::DispatchOutcome::Success {
+                    chatcore::DispatchOutcome::Success {
                         response, attempts, ..
                     } => {
                         tracing::info!(
@@ -342,7 +342,7 @@ async fn chat_completions(store: SharedStore, body: Value, api_key: &str) -> axu
                                 .into_response(),
                         }
                     }
-                    gf_chatcore::DispatchOutcome::Exhausted {
+                    chatcore::DispatchOutcome::Exhausted {
                         status,
                         last_error,
                         attempts,
@@ -420,7 +420,7 @@ async fn sse_to_claude_response(
     use futures_util::StreamExt;
     let bytes = response.bytes().await.unwrap_or_default();
     let text = String::from_utf8_lossy(&bytes);
-    let mut state = gf_translator::StreamState::new(model);
+    let mut state = translator::StreamState::new(model);
     for line in text.lines() {
         let Some(data) = line.strip_prefix("data: ") else {
             continue;
@@ -429,7 +429,7 @@ async fn sse_to_claude_response(
             continue;
         }
         if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-            let _ = gf_translator::openai_chunk_to_claude_events(&chunk, &mut state);
+            let _ = translator::openai_chunk_to_claude_events(&chunk, &mut state);
         }
     }
     if !state.started {
@@ -452,7 +452,7 @@ async fn sse_to_claude_response(
         "role": "assistant",
         "model": model,
         "content": content,
-        "stop_reason": gf_translator::finish_reason_to_stop_reason(finish),
+        "stop_reason": translator::finish_reason_to_stop_reason(finish),
         "stop_sequence": Value::Null,
         "usage": {
             "input_tokens": state.input_tokens,
@@ -676,7 +676,7 @@ async fn create_combo(
         .cloned()
         .unwrap_or(Value::Array(vec![]));
     let kind = body.get("kind").and_then(|k| k.as_str()).unwrap_or("fallback");
-    let id = gf_auth::uuid_v4();
+    let id = auth::uuid_v4();
     let models_json = serde_json::to_string(&models).unwrap_or_default();
     {
         let store = store.lock().expect("store lock");
@@ -737,16 +737,16 @@ async fn messages(
     // Direct route (phase 3/4): registry provider + migrated credentials →
     // dispatch straight to the provider upstream with failover; no 9router hop.
     {
-        let registry = gf_providers::Registry::load_embedded();
+        let registry = providers::Registry::load_embedded();
         let route = {
             let store = store.lock().expect("store lock");
-            gf_chatcore::direct_route(&registry, &store, &model)
+            chatcore::direct_route(&registry, &store, &model)
         };
         if let Some((provider, model_id, creds)) = route {
             let transport = provider.transport.clone().unwrap();
             if transport.format == "claude" && !transport.base_url.starts_with("zcode://") {
                 // Same format: dispatch the claude body verbatim.
-                return match gf_chatcore::dispatch_with_failover(
+                return match chatcore::dispatch_with_failover(
                     &provider.id,
                     &transport,
                     &creds,
@@ -755,7 +755,7 @@ async fn messages(
                 )
                 .await
                 {
-                    gf_chatcore::DispatchOutcome::Success {
+                    chatcore::DispatchOutcome::Success {
                         response, attempts, ..
                     } => {
                         tracing::info!(
@@ -776,7 +776,7 @@ async fn messages(
                                 .into_response(),
                         }
                     }
-                    gf_chatcore::DispatchOutcome::Exhausted {
+                    chatcore::DispatchOutcome::Exhausted {
                         status,
                         last_error,
                         attempts,
@@ -794,8 +794,8 @@ async fn messages(
             }
             // Cross-format: client speaks Claude, provider speaks OpenAI.
             if transport.format != "claude" && !transport.base_url.starts_with("zcode://") {
-                let openai_body = gf_translator::claude_request_to_openai(&body);
-                return match gf_chatcore::dispatch_openai_with_failover(
+                let openai_body = translator::claude_request_to_openai(&body);
+                return match chatcore::dispatch_openai_with_failover(
                     &provider.id,
                     &transport,
                     &creds,
@@ -804,7 +804,7 @@ async fn messages(
                 )
                 .await
                 {
-                    gf_chatcore::DispatchOutcome::Success {
+                    chatcore::DispatchOutcome::Success {
                         response, attempts, ..
                     } => {
                         tracing::info!(
@@ -826,7 +826,7 @@ async fn messages(
                         }
                         match response.json::<Value>().await {
                             Ok(openai_json) => {
-                                let claude = gf_translator::openai_response_to_claude(
+                                let claude = translator::openai_response_to_claude(
                                     &openai_json,
                                     &model,
                                 );
@@ -839,7 +839,7 @@ async fn messages(
                                 .into_response(),
                         }
                     }
-                    gf_chatcore::DispatchOutcome::Exhausted {
+                    chatcore::DispatchOutcome::Exhausted {
                         status,
                         last_error,
                         attempts,
@@ -860,7 +860,7 @@ async fn messages(
 
     let base = upstream_base();
     let key = upstream_key();
-    let openai_body = gf_translator::claude_request_to_openai(&body);
+    let openai_body = translator::claude_request_to_openai(&body);
     let client = reqwest::Client::new();
     let mut request = client
         .post(format!("{base}/v1/chat/completions"))
@@ -891,7 +891,7 @@ async fn messages(
                 }
                 match response.json::<Value>().await {
                     Ok(upstream_json) => {
-                        let claude = gf_translator::openai_response_to_claude(
+                        let claude = translator::openai_response_to_claude(
                             &upstream_json,
                             &model,
                         );
@@ -906,7 +906,7 @@ async fn messages(
             } else {
                 // Translate the upstream SSE stream into Claude events.
                 use futures_util::StreamExt;
-                let mut state = gf_translator::StreamState::new(&model);
+                let mut state = translator::StreamState::new(&model);
                 let stream = response.bytes_stream();
                 let mut buffer = String::new();
                 let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(32);
@@ -926,7 +926,7 @@ async fn messages(
                                 }
                                 if let Ok(chunk_json) = serde_json::from_str::<Value>(data) {
                                     for event in
-                                        gf_translator::openai_chunk_to_claude_events(
+                                        translator::openai_chunk_to_claude_events(
                                             &chunk_json,
                                             &mut state,
                                         )
@@ -985,7 +985,7 @@ async fn messages(
 /// Bind and serve. Resolves once the listener is bound (the serve future runs
 /// for the lifetime of the spawned task).
 pub async fn start_server(port: u16) -> std::io::Result<()> {
-    let registry = gf_providers::Registry::load_embedded();
+    let registry = providers::Registry::load_embedded();
     tracing::info!(
         "gateforge {} starting with {} providers",
         env!("CARGO_PKG_VERSION"),
@@ -998,7 +998,7 @@ pub async fn start_server(port: u16) -> std::io::Result<()> {
     );
 
     // Open the store (first boot copies a 9router database when present).
-    let data_dir = gf_store::default_data_dir();
+    let data_dir = store::default_data_dir();
     let store = Store::open(&data_dir).map_err(std::io::Error::other)?;
     let connections = store.list_connections(None).unwrap_or_default();
     tracing::info!(
@@ -1055,8 +1055,8 @@ async fn auth_login(
     }
 
     // Mint a session token (HS256-like: HMAC of machine id + expiry).
-    let auth = gf_auth::machine_id();
-    let token = gf_auth::dashboard_session_token(&auth, password);
+    let auth = machine_id();
+    let token = auth::dashboard_session_token(&auth, password);
     (
         [(header::SET_COOKIE, format!("auth_token={token}; Path=/; HttpOnly"))],
         axum::Json(serde_json::json!({ "ok": true })),
@@ -1116,13 +1116,13 @@ async fn create_key(
         .unwrap_or("unnamed")
         .to_string();
     let machine = machine_id();
-    let generated = gf_auth::generate_api_key(&machine);
-    let id = gf_auth::uuid_v4();
+    let generated = auth::generate_api_key(&machine);
+    let id = auth::uuid_v4();
     let now = chrono::Utc::now().to_rfc3339();
     {
         let store = store.lock().expect("store lock");
         if let Err(error) = store
-            .upsert_api_key(&gf_store::ApiKeyRow {
+            .upsert_api_key(&store::ApiKeyRow {
                 id: id.clone(),
                 key: generated.key.clone(),
                 name: Some(name.clone()),

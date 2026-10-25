@@ -1,8 +1,9 @@
 [package]
-name = "gf-zcode"
+name = "auth"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-tokio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.11.1"

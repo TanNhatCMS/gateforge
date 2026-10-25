@@ -1,8 +1,8 @@
 // Chat core: provider/model resolution, credential selection from the store,
 // direct upstream dispatch and multi-account failover. This is where GateForge
 // stops being a passthrough and becomes its own router.
-use gf_providers::{Provider, Registry, Transport};
-use gf_store::Store;
+use providers::{Provider, Registry, Transport};
+use store::Store;
 use serde_json::Value;
 
 /// Split "provider/model" into its parts. None when there is no prefix.
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn credential_extraction_from_data_json() {
-        let dir = std::env::temp_dir().join(format!("gf-chatcore-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("chatcore-test-{}", std::process::id()));
         std::env::set_var("GATEFORGE_NO_MIGRATE", "1");
         let _ = std::fs::remove_dir_all(&dir);
         let store = Store::open(&dir).expect("store");
@@ -270,7 +270,7 @@ mod tests {
         let key_first = format!("fixture-key-first-{}", std::process::id());
         let key_second = format!("fixture-key-second-{}", std::process::id());
         let key_inactive = format!("fixture-key-inactive-{}", std::process::id());
-        let row = |id: &str, priority: i64, active: bool, key: &str| gf_store::ConnectionRow {
+        let row = |id: &str, priority: i64, active: bool, key: &str| store::ConnectionRow {
             id: id.into(),
             provider: "glm".into(),
             auth_type: "oauth".into(),
